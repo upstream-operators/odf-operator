@@ -1,0 +1,72 @@
+From 5d8bf8dc3ed89c2a4b1e3eb63dd98cd7f23b9ff2 Mon Sep 17 00:00:00 2001
+From: Owen Howard <owen@ziax.com>
+Date: Sun, 3 Dec 2023 23:33:11 +0000
+Subject: [PATCH] Deployment workflow
+
+---
+ .github/workflows/deploy.yml | 52 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 52 insertions(+)
+ create mode 100644 .github/workflows/deploy.yml
+
+diff --git a/.github/workflows/deploy.yml b/.github/workflows/deploy.yml
+new file mode 100644
+index 00000000..41e82117
+--- /dev/null
++++ b/.github/workflows/deploy.yml
+@@ -0,0 +1,52 @@
++name: Deploy
++
++on: push
++
++jobs:
++  deploy:
++    runs-on: ubuntu-latest
++    steps:
++      - name: Checkout
++        uses: actions/checkout@v2
++        with:
++          fetch-depth: 0
++
++      - uses: actions/setup-go@v4
++        with:
++          go-version-file: go.mod
++
++      - name: Login to ghcr.io
++        uses: docker/login-action@v3
++        with:
++          registry: ghcr.io
++          username: ${{ github.actor }}
++          password: ${{ secrets.GITHUB_TOKEN }}
++
++      - name: Build and Push Images
++        env:
++          IMAGE_REGISTRY: ghcr.io
++          REGISTRY_NAMESPACE: ${{ github.repository }}
++          OCS_BUNDLE_IMG_LOCATION: ghcr.io/upstream-operators/ocs-operator
++          ODF_CONSOLE_IMG_LOCATION: ghcr.io/upstream-operators/odf-operator
++          OPERATOR_CATALOGSOURCE_NAMESPACE: upstream-operators
++        run: |
++          branch="${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}"
++          version="${branch#release-}"
++          export IMAGE_TAG=$(date "+${version}-%Y-%m-%d-%H%M%S")
++          export REGISTRY_PATH="${IMAGE_REGISTRY}/${REGISTRY_NAMESPACE}"
++          export OCS_BUNDLE_IMG_TAG="${version}"
++          export ODF_CONSOLE_IMG_TAG="${IMAGE_TAG}"
++          export OSE_KUBE_RBAC_PROXY_IMG="ghcr.io/upstream-operators/kube-rbac-proxy/kube-rbac-proxy:${version}"
++          
++          make docker-build
++          docker tag ${REGISTRY_PATH}/odf-operator:${IMAGE_TAG} ${REGISTRY_PATH}/odf-operator:${version}
++          docker push ${REGISTRY_PATH}/odf-operator:${IMAGE_TAG}
++          docker push ${REGISTRY_PATH}/odf-operator:${version}
++          make bundle-build
++          docker tag ${REGISTRY_PATH}/odf-operator-bundle:${IMAGE_TAG} ${REGISTRY_PATH}/odf-operator-bundle:${version}
++          docker push ${REGISTRY_PATH}/odf-operator-bundle:${IMAGE_TAG}
++          docker push ${REGISTRY_PATH}/odf-operator-bundle:${version}
++          make catalog-build
++          docker tag ${REGISTRY_PATH}/odf-operator-catalog:${IMAGE_TAG} ${REGISTRY_PATH}/odf-operator-catalog:${version}
++          docker push ${REGISTRY_PATH}/odf-operator-catalog:${IMAGE_TAG}
++          docker push ${REGISTRY_PATH}/odf-operator-catalog:${version}
+\ No newline at end of file
+-- 
+2.41.0
+
