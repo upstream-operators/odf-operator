@@ -142,6 +142,7 @@ type ClusterSpec struct {
 
 	// The path on the host where config and data can be persisted
 	// +kubebuilder:validation:Pattern=`^/(\S+)`
+	// +kubebuilder:validation:XValidation:message="DataDirHostPath is immutable",rule="self == oldSelf"
 	// +optional
 	DataDirHostPath string `json:"dataDirHostPath,omitempty"`
 
@@ -221,6 +222,47 @@ type ClusterSpec struct {
 	// +optional
 	// +nullable
 	LogCollector LogCollectorSpec `json:"logCollector,omitempty"`
+
+	// CSI Driver Options applied per cluster.
+	// +optional
+	CSI CSIDriverSpec `json:"csi,omitempty"`
+
+	// Ceph Config options
+	// +optional
+	// +nullable
+	CephConfig map[string]map[string]string `json:"cephConfig,omitempty"`
+}
+
+// CSIDriverSpec defines CSI Driver settings applied per cluster.
+type CSIDriverSpec struct {
+	// ReadAffinity defines the read affinity settings for CSI driver.
+	// +optional
+	ReadAffinity ReadAffinitySpec `json:"readAffinity"`
+	// CephFS defines CSI Driver settings for CephFS driver.
+	// +optional
+	CephFS CSICephFSSpec `json:"cephfs,omitempty"`
+}
+
+// CSICephFSSpec defines the settings for CephFS CSI driver.
+type CSICephFSSpec struct {
+	// KernelMountOptions defines the mount options for kernel mounter.
+	// +optional
+	KernelMountOptions string `json:"kernelMountOptions,omitempty"`
+	// FuseMountOptions defines the mount options for ceph fuse mounter.
+	// +optional
+	FuseMountOptions string `json:"fuseMountOptions,omitempty"`
+}
+
+// ReadAffinitySpec defines the read affinity settings for CSI driver.
+type ReadAffinitySpec struct {
+	// Enables read affinity for CSI driver.
+	// +optional
+	Enabled bool `json:"enabled"`
+	// CrushLocationLabels defines which node labels to use
+	// as CRUSH location. This should correspond to the values set in
+	// the CRUSH map.
+	// +optional
+	CrushLocationLabels []string `json:"crushLocationLabels,omitempty"`
 }
 
 // LogCollectorSpec is the logging spec
@@ -318,6 +360,12 @@ type DashboardSpec struct {
 	// SSL determines whether SSL should be used
 	// +optional
 	SSL bool `json:"ssl,omitempty"`
+	// Endpoint for the Prometheus host
+	// +optional
+	PrometheusEndpoint string `json:"prometheusEndpoint,omitempty"`
+	// Whether to verify the ssl endpoint for prometheus. Set to false for a self-signed cert.
+	// +optional
+	PrometheusEndpointSSLVerify bool `json:"prometheusEndpointSSLVerify,omitempty"`
 }
 
 // MonitoringSpec represents the settings for Prometheus based Ceph monitoring
@@ -420,11 +468,18 @@ type Capacity struct {
 // CephStorage represents flavors of Ceph Cluster Storage
 type CephStorage struct {
 	DeviceClasses []DeviceClasses `json:"deviceClasses,omitempty"`
+	OSD           OSDStatus       `json:"osd,omitempty"`
 }
 
 // DeviceClasses represents device classes of a Ceph Cluster
 type DeviceClasses struct {
 	Name string `json:"name,omitempty"`
+}
+
+// OSDStatus represents OSD status of the ceph Cluster
+type OSDStatus struct {
+	// StoreType is a mapping between the OSD backend stores and number of OSDs using these stores
+	StoreType map[string]int `json:"storeType,omitempty"`
 }
 
 // ClusterVersion represents the version of a Ceph Cluster
@@ -521,6 +576,8 @@ const (
 )
 
 // MonSpec represents the specification of the monitor
+// +kubebuilder:validation:XValidation:message="zones must be less than or equal to count",rule="!has(self.zones) || (has(self.zones) && (size(self.zones) <= self.count))"
+// +kubebuilder:validation:XValidation:message="stretchCluster zones must be equal to 3",rule="!has(self.stretchCluster) || (has(self.stretchCluster) && (size(self.stretchCluster.zones) > 0) && (size(self.stretchCluster.zones) == 3))"
 type MonSpec struct {
 	// Count is the number of Ceph monitors
 	// +kubebuilder:validation:Minimum=0
@@ -530,6 +587,11 @@ type MonSpec struct {
 	// AllowMultiplePerNode determines if we can run multiple monitors on the same node (not recommended)
 	// +optional
 	AllowMultiplePerNode bool `json:"allowMultiplePerNode,omitempty"`
+	// +optional
+	FailureDomainLabel string `json:"failureDomainLabel,omitempty"`
+	// Zones are specified when we want to provide zonal awareness to mons
+	// +optional
+	Zones []MonZoneSpec `json:"zones,omitempty"`
 	// StretchCluster is the stretch cluster specification
 	// +optional
 	StretchCluster *StretchClusterSpec `json:"stretchCluster,omitempty"`
@@ -550,15 +612,15 @@ type StretchClusterSpec struct {
 	// Zones is the list of zones
 	// +optional
 	// +nullable
-	Zones []StretchClusterZoneSpec `json:"zones,omitempty"`
+	Zones []MonZoneSpec `json:"zones,omitempty"`
 }
 
-// StretchClusterZoneSpec represents the specification of a stretched zone in a Ceph Cluster
-type StretchClusterZoneSpec struct {
+// MonZoneSpec represents the specification of a zone in a Ceph Cluster
+type MonZoneSpec struct {
 	// Name is the name of the zone
 	// +optional
 	Name string `json:"name,omitempty"`
-	// Arbiter determines if the zone contains the arbiter
+	// Arbiter determines if the zone contains the arbiter used for stretch cluster mode
 	// +optional
 	Arbiter bool `json:"arbiter,omitempty"`
 	// VolumeClaimTemplate is the PVC template
@@ -569,9 +631,9 @@ type StretchClusterZoneSpec struct {
 
 // MgrSpec represents options to configure a ceph mgr
 type MgrSpec struct {
-	// Count is the number of manager to run
+	// Count is the number of manager daemons to run
 	// +kubebuilder:validation:Minimum=0
-	// +kubebuilder:validation:Maximum=2
+	// +kubebuilder:validation:Maximum=5
 	// +optional
 	Count int `json:"count,omitempty"`
 	// AllowMultiplePerNode allows to run multiple managers on the same node (not recommended)
@@ -1375,6 +1437,15 @@ type ObjectStoreSpec struct {
 	// +optional
 	// +nullable
 	Security *ObjectStoreSecuritySpec `json:"security,omitempty"`
+
+	// The list of allowed namespaces in addition to the object store namespace
+	// where ceph object store users may be created. Specify "*" to allow all
+	// namespaces, otherwise list individual namespaces that are to be allowed.
+	// This is useful for applications that need object store credentials
+	// to be created in their own namespace, where neither OBCs nor COSI
+	// is being used to create buckets. The default is empty.
+	// +optional
+	AllowUsersInNamespaces []string `json:"allowUsersInNamespaces,omitempty"`
 }
 
 // ObjectHealthCheckSpec represents the health check of an object store
@@ -1585,6 +1656,9 @@ type ObjectStoreUserSpec struct {
 	// +optional
 	// +nullable
 	Quotas *ObjectUserQuotaSpec `json:"quotas,omitempty"`
+	// The namespace where the parent CephCluster and CephObjectStore are found
+	// +optional
+	ClusterNamespace string `json:"clusterNamespace,omitempty"`
 }
 
 // Additional admin-level capabilities for the Ceph object store user
@@ -1872,7 +1946,6 @@ type HTTPEndpointSpec struct {
 	// +optional
 	DisableVerifySSL bool `json:"disableVerifySSL,omitempty"`
 	// Send the notifications with the CloudEvents header: https://github.com/cloudevents/spec/blob/main/cloudevents/adapters/aws-s3.md
-	// Supported for Ceph Quincy (v17) or newer.
 	// +optional
 	SendCloudEvents bool `json:"sendCloudEvents,omitempty"`
 }
@@ -2035,14 +2108,12 @@ type NFSGaneshaSpec struct {
 // GaneshaRADOSSpec represents the specification of a Ganesha RADOS object
 type GaneshaRADOSSpec struct {
 	// The Ceph pool used store the shared configuration for NFS-Ganesha daemons.
-	// This setting is required for Ceph v15 and ignored for Ceph v16.
-	// As of Ceph Pacific 16.2.7+, this is internally hardcoded to ".nfs".
+	// This setting is deprecated, as it is internally required to be ".nfs".
 	// +optional
 	Pool string `json:"pool,omitempty"`
 
 	// The namespace inside the Ceph pool (set by 'pool') where shared NFS-Ganesha config is stored.
-	// This setting is required for Ceph v15 and ignored for Ceph v16.
-	// As of Ceph Pacific v16+, this is internally set to the name of the CephNFS.
+	// This setting is deprecated as it is internally set to the name of the CephNFS.
 	// +optional
 	Namespace string `json:"namespace,omitempty"`
 }
@@ -2088,6 +2159,11 @@ type GaneshaServerSpec struct {
 	// +nullable
 	// +optional
 	HostNetwork *bool `json:"hostNetwork,omitempty"`
+
+	// A liveness-probe to verify that Ganesha server has valid run-time state.
+	// If LivenessProbe.Disabled is false and LivenessProbe.Probe is nil uses default probe.
+	// +optional
+	LivenessProbe *ProbeSpec `json:"livenessProbe,omitempty"`
 }
 
 // NFSSecuritySpec represents security configurations for an NFS server pod
@@ -2239,18 +2315,47 @@ type SSSDSidecarAdditionalFile struct {
 }
 
 // NetworkSpec for Ceph includes backward compatibility code
+// +kubebuilder:validation:XValidation:message="at least one network selector must be specified when using multus",rule="!has(self.provider) || (self.provider != 'multus' || (self.provider == 'multus' && size(self.selectors) > 0))"
 type NetworkSpec struct {
 	// Provider is what provides network connectivity to the cluster e.g. "host" or "multus"
+	// +kubebuilder:validation:XValidation:message="network provider must be disabled (reverted to empty string) before a new provider is enabled",rule="self == '' || self == oldSelf"
 	// +nullable
 	// +optional
-	Provider string `json:"provider,omitempty"`
+	Provider NetworkProviderType `json:"provider,omitempty"`
 
-	// Selectors string values describe what networks will be used to connect the cluster.
-	// Meanwhile the keys describe each network respective responsibilities or any metadata
-	// storage provider decide.
+	// Selectors define NetworkAttachmentDefinitions to be used for Ceph public and/or cluster
+	// networks when the "multus" network provider is used. This config section is not used for
+	// other network providers.
+	//
+	// Valid keys are "public" and "cluster". Refer to Ceph networking documentation for more:
+	// https://docs.ceph.com/en/reef/rados/configuration/network-config-ref/
+	//
+	// Refer to Multus network annotation documentation for help selecting values:
+	// https://github.com/k8snetworkplumbingwg/multus-cni/blob/master/docs/how-to-use.md#run-pod-with-network-annotation
+	//
+	// Rook will make a best-effort attempt to automatically detect CIDR address ranges for given
+	// network attachment definitions. Rook's methods are robust but may be imprecise for
+	// sufficiently complicated networks. Rook's auto-detection process obtains a new IP address
+	// lease for each CephCluster reconcile. If Rook fails to detect, incorrectly detects, only
+	// partially detects, or if underlying networks do not support reusing old IP addresses, it is
+	// best to use the 'addressRanges' config section to specify CIDR ranges for the Ceph cluster.
+	//
+	// As a contrived example, one can use a theoretical Kubernetes-wide network for Ceph client
+	// traffic and a theoretical Rook-only network for Ceph replication traffic as shown:
+	//   selectors:
+	//     public: "default/cluster-fast-net"
+	//     cluster: "rook-ceph/ceph-backend-net"
+	//
 	// +nullable
 	// +optional
-	Selectors map[string]string `json:"selectors,omitempty"`
+	Selectors map[CephNetworkType]string `json:"selectors,omitempty"`
+
+	// AddressRanges specify a list of CIDRs that Rook will apply to Ceph's 'public_network' and/or
+	// 'cluster_network' configurations. This config section may be used for the "host" or "multus"
+	// network providers.
+	// +nullable
+	// +optional
+	AddressRanges *AddressRangesSpec `json:"addressRanges,omitempty"`
 
 	// Settings for network connections such as compression and encryption across the
 	// wire.
@@ -2276,6 +2381,45 @@ type NetworkSpec struct {
 	// +optional
 	MultiClusterService MultiClusterServiceSpec `json:"multiClusterService,omitempty"`
 }
+
+// NetworkProviderType defines valid network providers for Rook.
+// +kubebuilder:validation:Enum="";host;multus
+type NetworkProviderType string
+
+const (
+	NetworkProviderDefault = NetworkProviderType("")
+	NetworkProviderHost    = NetworkProviderType("host")
+	NetworkProviderMultus  = NetworkProviderType("multus")
+)
+
+// CephNetworkType should be "public" or "cluster".
+// Allow any string so that over-specified legacy clusters do not break on CRD update.
+type CephNetworkType string
+
+const (
+	CephNetworkPublic  = CephNetworkType("public")
+	CephNetworkCluster = CephNetworkType("cluster")
+)
+
+type AddressRangesSpec struct {
+	// Public defines a list of CIDRs to use for Ceph public network communication.
+	// +optional
+	Public CIDRList `json:"public"`
+
+	// Cluster defines a list of CIDRs to use for Ceph cluster network communication.
+	// +optional
+	Cluster CIDRList `json:"cluster"`
+}
+
+// An IPv4 or IPv6 network CIDR.
+//
+// This naive kubebuilder regex provides immediate feedback for some typos and for a common problem
+// case where the range spec is forgotten (e.g., /24). Rook does in-depth validation in code.
+// +kubebuilder:validation:Pattern=`^[0-9a-fA-F:.]{2,}\/[0-9]{1,3}$`
+type CIDR string
+
+// A list of CIDRs.
+type CIDRList []CIDR
 
 type MultiClusterServiceSpec struct {
 	// Enable multiClusterService to export the mon and OSD services to peer cluster.
@@ -2319,7 +2463,7 @@ type EncryptionSpec struct {
 
 type CompressionSpec struct {
 	// Whether to compress the data in transit across the wire.
-	// The default is not set. Requires Ceph Quincy (v17) or newer.
+	// The default is not set.
 	// +optional
 	Enabled bool `json:"enabled,omitempty"`
 }
@@ -2342,6 +2486,11 @@ type DisruptionManagementSpec struct {
 	// No values or 0 means that the operator will wait until the placement groups are healthy before unblocking the next drain.
 	// +optional
 	PGHealthCheckTimeout time.Duration `json:"pgHealthCheckTimeout,omitempty"`
+
+	// PgHealthyRegex is the regular expression that is used to determine which PG states should be considered healthy.
+	// The default is `^(active\+clean|active\+clean\+scrubbing|active\+clean\+scrubbing\+deep)$`
+	// +optional
+	PGHealthyRegex string `json:"pgHealthyRegex,omitempty"`
 
 	// Deprecated. This enables management of machinedisruptionbudgets.
 	// +optional
@@ -2589,6 +2738,14 @@ type StorageScopeSpec struct {
 	StorageClassDeviceSets []StorageClassDeviceSet `json:"storageClassDeviceSets,omitempty"`
 	// +optional
 	Store OSDStore `json:"store,omitempty"`
+	// +optional
+	// FlappingRestartIntervalHours defines the time for which the OSD pods, that failed with zero exit code, will sleep before restarting.
+	// This is needed for OSD flapping where OSD daemons are marked down more than 5 times in 600 seconds by Ceph.
+	// Preventing the OSD pods to restart immediately in such scenarios will prevent Rook from marking OSD as `up` and thus
+	// peering of the PGs mapped to the OSD.
+	// User needs to manually restart the OSD pod if they manage to fix the underlying OSD flapping issue before the restart interval.
+	// The sleep will be disabled if this interval is set to 0.
+	FlappingRestartIntervalHours int `json:"flappingRestartIntervalHours"`
 }
 
 // OSDStore is the backend storage type used for creating the OSDs
@@ -2597,6 +2754,11 @@ type OSDStore struct {
 	// +optional
 	// +kubebuilder:validation:Enum=bluestore;bluestore-rdr;
 	Type string `json:"type,omitempty"`
+	// UpdateStore updates the backend store for existing OSDs. It destroys each OSD one at a time, cleans up the backing disk
+	// and prepares same OSD on that disk
+	// +optional
+	// +kubebuilder:validation:Pattern=`^$|^yes-really-update-store$`
+	UpdateStore string `json:"updateStore,omitempty"`
 }
 
 // Node is a storage nodes
@@ -2760,11 +2922,41 @@ type CephFilesystemSubVolumeGroupList struct {
 
 // CephFilesystemSubVolumeGroupSpec represents the specification of a Ceph Filesystem SubVolumeGroup
 type CephFilesystemSubVolumeGroupSpec struct {
+	// The name of the subvolume group. If not set, the default is the name of the subvolumeGroup CR.
+	// +kubebuilder:validation:XValidation:message="name is immutable",rule="self == oldSelf"
+	// +optional
+	Name string `json:"name,omitempty"`
 	// FilesystemName is the name of Ceph Filesystem SubVolumeGroup volume name. Typically it's the name of
 	// the CephFilesystem CR. If not coming from the CephFilesystem CR, it can be retrieved from the
 	// list of Ceph Filesystem volumes with `ceph fs volume ls`. To learn more about Ceph Filesystem
 	// abstractions see https://docs.ceph.com/en/latest/cephfs/fs-volumes/#fs-volumes-and-subvolumes
+	// +kubebuilder:validation:XValidation:message="filesystemName is immutable",rule="self == oldSelf"
 	FilesystemName string `json:"filesystemName"`
+	// Pinning configuration of CephFilesystemSubVolumeGroup,
+	// reference https://docs.ceph.com/en/latest/cephfs/fs-volumes/#pinning-subvolumes-and-subvolume-groups
+	// only one out of (export, distributed, random) can be set at a time
+	// +optional
+	Pinning CephFilesystemSubVolumeGroupSpecPinning `json:"pinning,omitempty"`
+}
+
+// CephFilesystemSubVolumeGroupSpecPinning represents the pinning configuration of SubVolumeGroup
+// +kubebuilder:validation:XValidation:message="only one pinning type should be set",rule="(has(self.export) && !has(self.distributed) && !has(self.random)) || (!has(self.export) && has(self.distributed) && !has(self.random)) || (!has(self.export) && !has(self.distributed) && has(self.random)) || (!has(self.export) && !has(self.distributed) && !has(self.random))"
+type CephFilesystemSubVolumeGroupSpecPinning struct {
+	// +kubebuilder:validation:Minimum=-1
+	// +kubebuilder:validation:Maximum=256
+	// +optional
+	// +nullable
+	Export *int `json:"export,omitempty"`
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1
+	// +optional
+	// +nullable
+	Distributed *int `json:"distributed,omitempty"`
+	// +kubebuilder:validation:Minimum=0.0
+	// +kubebuilder:validation:Maximum=1.0
+	// +optional
+	// +nullable
+	Random *float64 `json:"random,,omitempty"`
 }
 
 // CephFilesystemSubVolumeGroupStatus represents the Status of Ceph Filesystem SubVolumeGroup
@@ -2807,8 +2999,13 @@ type CephBlockPoolRadosNamespaceList struct {
 
 // CephBlockPoolRadosNamespaceSpec represents the specification of a CephBlockPool Rados Namespace
 type CephBlockPoolRadosNamespaceSpec struct {
+	// The name of the CephBlockPoolRadosNamespaceSpec namespace. If not set, the default is the name of the CR.
+	// +kubebuilder:validation:XValidation:message="name is immutable",rule="self == oldSelf"
+	// +optional
+	Name string `json:"name,omitempty"`
 	// BlockPoolName is the name of Ceph BlockPool. Typically it's the name of
 	// the CephBlockPool CR.
+	// +kubebuilder:validation:XValidation:message="blockPoolName is immutable",rule="self == oldSelf"
 	BlockPoolName string `json:"blockPoolName"`
 }
 
